@@ -1,0 +1,356 @@
+/*
+
+Final assignment (optional) exercise #3 - Assertive Programming course @ BGU, Fall Semester 2024
+
+Closely following code+spec(*)+annotations from AdaCore's "SPARK tetris example for Raspberry Pico Display":
+- https://blog.adacore.com/spark-tetris-on-the-raspberry-pico
+- https://github.com/elsaferrara/tetris
+
+(*) added some functional requirements - beyond the original focus on the absence of runtime errors
+
+- using Dafny 4.4.0
+
+*/
+include "IO.dfy"
+include "tetris.dfy"
+
+method DisplayCell(C: Cell) {
+	match C {
+		case Empty => print " ";
+		case I => print "I";
+		case O => print "O";
+		case J => print "J";
+		case L => print "L";
+		case S => print "S";
+		case T => print "T";
+		case Z => print "Z";
+	}
+}
+
+const DISPLAY_LINE_WIDTH := 180
+
+/*
+
+Goal: annotate the following implementation such that it verifies (changing the {:verify false} to {:verify true} or deleting it);
+      no need to document the proof obligations
+
+*/
+method {:verify false} DisplayAll(complete_display_info: IO<DisplayInfo>)
+	requires 0 < Distance_Between_Boards <= DISPLAY_LINE_WIDTH
+	requires forall display_item | display_item in complete_display_info.omega :: ValidBoardSnapshotDimensions(display_item.BS)
+	requires forall display_item, P | display_item in complete_display_info.omega &&
+		P == display_item.falling_piece :: ValidPiece(P) && Piece_Within_Board(P)
+{
+	var display_info := new IO<DisplayInfo>;
+	display_info.alpha := complete_display_info.omega;
+	var M := DISPLAY_LINE_WIDTH / Distance_Between_Boards; // max boards per line in the game's display
+	var boards_line :=	new DisplayInfo[M];
+	while !display_info.EOF()
+	{
+		var i := 0;
+		while i != M && !display_info.EOF()
+		{
+			boards_line[i] := display_info.Input();
+			i := i+1;
+		}
+		DisplayLine(boards_line, i);
+		i := i+1;
+	}
+}
+
+function Spaces(n: nat): string
+	decreases n
+{
+	if n == 0 then "" else " " + Spaces(n-1)
+}
+
+// support up to 5-digits (beyond that, the info will be not be well-aligned with the boards on each line)
+function Width(n: nat): nat {
+	if n < 10 then 1 else if n < 100 then 2 else if n < 1000 then 3 else if n < 10000 then 4 else 5
+}
+
+// check coordinates for overlap with the given piece
+predicate OnPiece(P: Piece, x: int, y: int)
+	requires ValidPiece(P) && X_Coord(x) && Y_Coord(y)
+{
+	match Shape_of(P)
+	case O =>
+		(x == X_of(P) || x == X_of(P)+1) && (y == Y_of(P) == y || y == Y_of(P)+1)
+	case I =>
+		exists X,Y :: X in I_Delta && Y in I_Delta && Possible_I_Shapes[Direction_of(P)][Y][X] && x == X_of(P)+X && y == Y_of(P)+Y
+	case _ =>
+		assert IsThreeShape(Shape_of(P));
+		exists X,Y :: X in Three_Delta && Y in Three_Delta && Possible_Three_Shapes[Shape_of(P)][Direction_of(P)][Y][X] &&
+			x == X_of(P)+X && y == Y_of(P)+Y
+}
+
+method DisplayLine(boards_line: array<DisplayInfo>, number_of_boards: nat)
+	requires 0 < number_of_boards <= boards_line.Length
+	requires forall display_item | display_item in boards_line[..number_of_boards] :: ValidBoardSnapshotDimensions(display_item.BS)
+	requires forall display_item, P | display_item in boards_line[..number_of_boards] &&
+		P == display_item.falling_piece :: ValidPiece(P) && Piece_Within_Board(P)
+{
+	var N := number_of_boards;
+	print "\nTime:";
+	var i := 0;
+	while i != N
+		invariant 0 <= i <= N <= boards_line.Length
+	{
+		var x := boards_line[i].time;
+		var w := Width(x) + (if i == 0 then 7 else 0);
+		print Spaces(Distance_Between_Boards-w), x;
+		i := i+1;
+	}
+	print "\nScore:";
+	i := 0;
+	while i != N
+		invariant 0 <= i <= N <= boards_line.Length
+	{
+		var x := boards_line[i].score;
+		var w := Width(x) + (if i == 0 then 8 else 0);
+		print Spaces(Distance_Between_Boards-w), x;
+		i := i+1;
+	}
+	print "\nAction:";
+	i := 0;
+	while i != N
+		invariant 0 <= i <= N <= boards_line.Length
+	{
+		var str := if boards_line[i].is_new_piece then "*" else
+			match boards_line[i].latest_action
+			case Move_Down => "\\|/"
+			case Move_Left => "<-"
+			case Move_Right => "->"
+			case Turn_Clockwise => ")"
+			case Turn_Counter_Clockwise => "(";
+		var w := |str| + (if i == 0 then 9 else 0);
+		print Spaces(Distance_Between_Boards-w), str;
+		i := i+1;
+	}
+	print "\n";
+	i := 0;
+	while i != N
+		invariant 0 <= i <= N <= boards_line.Length
+	{
+		var x := 0;
+		print "+";
+		while X_Coord(x)
+			invariant 0 <= x <= X_Size
+			decreases X_Size-x
+		{
+			print "-";
+			x := x+1;
+		}
+		print "+ ";
+		i := i+1;
+	}
+	print "\n";
+	var y := 0;
+	while Y_Coord(y)
+		invariant 0 <= y <= Y_Size
+		decreases Y_Size-y
+	{
+		i := 0;
+		while i != N
+			invariant 0 <= i <= N <= boards_line.Length
+		{
+			var x := 0;
+			var BS := boards_line[i].BS;
+			print "|";
+			while X_Coord(x)
+				invariant ValidBoardSnapshotDimensions(BS)
+				invariant 0 <= x <= X_Size && 0 <= y < Y_Size
+				decreases X_Size-x
+			{
+				assert 0 <= y < |BS| && 0 <= x < |BS[y]| == X_Size by { assert ValidBoardSnapshotDimensions(BS); }
+				var C, P := BS[y][x], boards_line[i].falling_piece;
+				if C == Empty && OnPiece(P, x, y) {
+					C := Shape_of(P);
+				}
+				DisplayCell(C); 
+				x := x+1;
+			}
+			print "| ";
+			i := i+1;
+		}
+		print "\n";
+		y := y+1;
+	}
+	i := 0;
+	while i != N
+		invariant 0 <= i <= N <= boards_line.Length
+	{
+		var x := 0;
+		print "+";
+		while X_Coord(x)
+			invariant 0 <= x <= X_Size
+			decreases X_Size-x
+		{
+			print "-";
+			x := x+1;
+		}
+		print "+ ";
+		i := i+1;
+	}	
+	print "\n";
+}
+
+datatype Game_State = New_Piece | Piece_Fall | Game_Over
+
+method InitGameInput(pieces: IO<Piece>, actions: IO<Action>)
+	modifies pieces, actions
+	ensures forall P | P in pieces.alpha :: ValidPiece(P) && Piece_Within_Board(P)
+{
+	pieces.alpha := [(I, East, -2, 0), (I, East, -1, 0), (I, East, 0, 0), (I, East, 1, 0), (I, East, 2, 0), (I, East, 3, 0), (I, East, 4, 0),
+			(I, East, -2, 0), (I, East, -1, 0), (I, East, 0, 0), (I, East, 1, 0), (I, East, 2, 0), (I, East, 3, 0), (I, East, 4, 0),
+			(I, East, 5, 0), (O, East, 7, 0), (O, East, 8, 0),
+			(I, East, 2, 0), (L, East, 4, 0), (O, North, 5, 0), (Z, West, 2, 0), (I, East, 2, 0), (L, East, 4, 0), (I, East, 2, 0), (L, East, 4, 0),
+			(I, East, 2, 0), (L, East, 4, 0), (O, North, 5, 0), (Z, West, 2, 0), (I, East, 2, 0), (L, East, 4, 0), (I, East, 2, 0), (L, East, 4, 0)];
+	assert forall P | P in pieces.alpha :: ValidPiece(P) && Piece_Within_Board(P);
+	actions.alpha := [Move_Left,Move_Right,Move_Left,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Left, Move_Right, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Left, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Move_Down, Turn_Clockwise, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down,
+		Move_Down, Move_Right, Move_Down, Move_Down, Move_Down, Turn_Counter_Clockwise, Move_Down, Move_Down, Move_Down, Move_Down];
+}
+
+method Main() {
+	print "A SPARK-inspired Dafny TETRIS demo\n";
+	print "\nActions legend: down \\|/, left <-, right ->, turn clockwise ), turn counter-clockwise (\n";
+	print   "                and the appearance of a new piece is signalled with *\n";
+	var game_end_reason := "";
+	var cur_game_state := New_Piece;
+	var pieces: IO<Piece> := new IO<Piece>;
+	var actions: IO<Action> := new IO<Action>;
+	InitGameInput(pieces, actions);
+	var display_info: IO<DisplayInfo> := new IO<DisplayInfo>;
+	display_info.Rewrite();
+	var cur_board := new Cell[Y_Size, X_Size];
+	InitBoard(cur_board);
+	var cur_piece := DummyPiece; // will never be used yet must be initialized (as it's used in the invariant)
+	assert (cur_piece.1 is Direction) && ValidPiece(cur_piece);
+	var success;
+	var cur_state := Piece_Falling;
+	var cur_action;
+	var cur_time: nat, cur_score: nat := 0, 0; // time advances in the appearance of a new piece and on successful Move_Down actions
+	while cur_game_state != Game_Over
+		invariant forall P | P in pieces.alpha :: ValidPiece(P) && Piece_Within_Board(P)
+		invariant ValidPiece(cur_piece)
+		invariant ValidBoardDimensions(cur_board)
+		invariant cur_game_state == Piece_Fall ==> cur_state == Piece_Falling && Valid_Configuration(cur_board, cur_piece, cur_state)
+		invariant forall display_item | display_item in display_info.omega :: ValidBoardSnapshotDimensions(display_item.BS)
+		invariant forall display_item, P | display_item in display_info.omega && P == display_item.falling_piece :: ValidPiece(P) && Piece_Within_Board(P)
+		decreases if cur_game_state == Game_Over then 0 else |pieces.alpha| + |actions.alpha| + 1
+	{
+		ghost var V0 := if cur_game_state == Game_Over then 0 else |pieces.alpha| + |actions.alpha| + 1;
+		match cur_game_state {
+		case New_Piece =>
+			// Add a new piece
+			if pieces.EOF() {
+				assert cur_game_state != Game_Over;
+				assert V0 == |pieces.alpha| + |actions.alpha| + 1;
+				// ==> (since V0 >= 1)
+				assert 0 <= (if Game_Over == Game_Over then 0 else |pieces.alpha| + |actions.alpha|) < V0; // for loop termination
+				cur_game_state := Game_Over;
+				game_end_reason := "no more pieces";
+			}
+			else {
+				cur_piece := pieces.Input();
+				assert ValidPiece(cur_piece) && Piece_Within_Board(cur_piece);
+				cur_state := Piece_Falling;
+				// Stop the game when the piece cannot appear
+            	if !Valid_Configuration(cur_board, cur_piece, cur_state) {
+					cur_game_state := Game_Over;
+					game_end_reason := "next piece cannot appear (due to overlap with an existing piece)";
+				}
+				else {
+					cur_time := cur_time+1;
+					cur_game_state := Piece_Fall;
+					var board_snapshot := TakeBoardSnapshot(cur_board);
+					assert  ValidBoardSnapshotDimensions(board_snapshot);
+					display_info.Output(DisplayInfo(cur_time, board_snapshot, cur_piece, true, Move_Down, cur_score));
+				}
+			}
+		case Piece_Fall =>
+			assert cur_state == Piece_Falling && Valid_Configuration(cur_board, cur_piece, cur_state);
+			if actions.EOF() {
+				cur_game_state := Game_Over;
+				game_end_reason := "no more actions";
+			}
+			else {
+				cur_action := actions.Input();
+				success, cur_piece := Do_Action(cur_action, cur_board, cur_piece, cur_state);
+				if success || cur_action != Move_Down {
+					if cur_action == Move_Down {
+						cur_time := cur_time + 1;
+					}
+					var board_snapshot := TakeBoardSnapshot(cur_board);
+					assert  ValidBoardSnapshotDimensions(board_snapshot);
+					display_info.Output(DisplayInfo(cur_time, board_snapshot, cur_piece, false, cur_action, cur_score));
+				}
+				else {
+					// Done with that piece
+					assert !success && cur_action == Move_Down;
+					cur_state := Piece_Blocked;
+					cur_state := Include_Piece_In_Board(cur_piece, cur_state, cur_board);
+					ghost var BS := TakeBoardSnapshot(cur_board);
+					var deleted_lines;
+					deleted_lines, cur_state, BS := Delete_Complete_Lines(cur_piece, cur_state, cur_board, BS);
+					var nbr_of_complete_lines := |deleted_lines|;
+					cur_score := cur_score+nbr_of_complete_lines;
+					cur_game_state := New_Piece;
+				}
+			}
+		}
+		assert 0 <= (if cur_game_state == Game_Over then 0 else |pieces.alpha| + |actions.alpha| + 1) < V0;
+	}
+	DisplayAll(display_info);
+	print "GAME OVER: ", game_end_reason, "\n";
+}

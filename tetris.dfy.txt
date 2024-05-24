@@ -1,0 +1,231 @@
+/*
+
+Final assignment (optional) exercise #3 - Assertive Programming course @ BGU, Fall Semester 2024
+
+Closely following code+spec(*)+annotations from AdaCore's "SPARK tetris example for Raspberry Pico Display":
+- https://blog.adacore.com/spark-tetris-on-the-raspberry-pico
+- https://github.com/elsaferrara/tetris
+
+(*) added some functional requirements - beyond the original focus on the absence of runtime errors
+
+- using Dafny 4.4.0
+
+*/
+include "tetris-basics.dfy"
+
+method Do_Action(A: Action, B: Board, P0: Piece, ghost S: State) returns (Success: bool, P: Piece)
+	requires ValidBoardDimensions(B) && ValidPiece(P0)
+	requires Valid_Configuration(B, P0, S)
+	ensures Success <==> Move_Is_Possible(P0, A) && No_Overlap(B, Move(P0, A))
+	ensures P == if Success then Move(P0, A) else P0
+{
+	P := P0;
+	Success := false;
+	if Move_Is_Possible(P, A) {
+		var Candidate := Move(P, A);
+		if No_Overlap(B, Candidate) {
+			P := Candidate;
+			Success := true;
+		}
+	}
+}
+
+// transition from state where a piece is falling to its integration in the
+// board when it cannot fall anymore
+method Include_Piece_In_Board(P: Piece, S0: State, B: Board) returns (S: State)
+	requires ValidPiece(P) && ValidBoardDimensions(B)
+	requires S0 == Piece_Blocked && Valid_Configuration(B, P, S0)
+	modifies B
+	ensures S == Board_Before_Clean
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == Shape_of(P)
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && !CellIncluded(P, x, y) :: B[y, x] == old(B[y, x])
+{
+	match Shape_of(P) {
+	case O =>
+		Include_O_Piece_In_Board(P, S0, B);
+	case I =>
+		Include_I_Piece_In_Board(P, S0, B);
+	case _ =>
+		assert IsThreeShape(Shape_of(P));
+		Include_Three_Piece_In_Board(P, S0, B);
+	}
+	// update current state
+	S := Board_Before_Clean;
+}
+
+method Include_O_Piece_In_Board(P: Piece, S: State, B: Board)
+	requires ValidPiece(P) && ValidBoardDimensions(B)
+	requires Shape_of(P) == O
+	requires S == Piece_Blocked && Valid_Configuration(B, P, S)
+	modifies B
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == O
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && !CellIncluded(P, x, y) :: B[y, x] == old(B[y, x])
+{
+	var X, Y := X_of(P), Y_of(P);
+	B[Y, X] := O;
+	B[Y, X+1] := O;
+	B[Y+1, X] := O;
+	B[Y+1, X+1] := O;
+}
+
+twostate predicate Include_I_Inv1(P: Piece, S: State, B: Board, Y: int, dy: nat)
+	reads B
+{
+	0 <= dy <= |I_Delta| && Y == Y_of(P) && 0 <= Y+dy && Shape_of(P) == I && Piece_Within_Board(P) &&
+	ValidBoardDimensions(B) && Valid_Configuration(B, P, Board_Before_Clean) &&
+	(forall x, y | 0 <= y < Y+dy && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == I) &&
+	(forall x, y | Y+dy <= y < B.Length0 && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == old(B[y, x]) == Empty) &&
+	(forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && !CellIncluded(P, x, y) :: B[y, x] == old(B[y, x]))
+}
+
+twostate predicate Include_I_Inv2(P: Piece, S: State, B: Board, Y: int, dy: nat, X: int, dx: int)
+	reads B
+{
+	dy in I_Delta && Y == Y_of(P) && Y_Coord(Y+dy) && 0 <= dx <= |I_Delta| && Shape_of(P) == I && Piece_Within_Board(P) &&
+	ValidBoardDimensions(B) && Valid_Configuration(B, P, Board_Before_Clean) &&
+	(forall x, y | 0 <= y < Y+dy && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == I) &&
+	(forall x | X_Coord(x) && 0 <= x < X+dx && CellIncluded(P, x, Y+dy) :: B[Y+dy, x] == I) &&
+	(forall x | X_Coord(x) && X+dx <= x < X_Size && 0 <= x && CellIncluded(P, x, Y+dy) :: B[Y+dy, x] == old(B[Y+dy, x]) == Empty) &&
+	(forall x, y | Y+dy < y < B.Length0 && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == old(B[y, x]) == Empty) &&
+	(forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && !CellIncluded(P, x, y) :: B[y, x] == old(B[y, x]))
+}
+
+// Note: feel free to turn verification back on, here; it's published with {:verify false} since it verifies quite slowly; 
+// on the author's machine inside VS Code using Dafny 4.4.0, it works by updating the verification time limit to 40 seconds
+method {:verify false} Include_I_Piece_In_Board(P: Piece, S: State, B: Board)
+	requires ValidPiece(P) && ValidBoardDimensions(B)
+	requires Shape_of(P) == I
+	requires S == Piece_Blocked && Valid_Configuration(B, P, S)
+	modifies B
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == I
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && !CellIncluded(P, x, y) :: B[y, x] == old(B[y, x])
+{
+	var X, Y := X_of(P), Y_of(P);
+	var dy := if Y < 0 then -Y else 0;
+	while dy in I_Delta && Y+dy < B.Length0
+		invariant Include_I_Inv1(P, S, B, Y, dy)
+		decreases |I_Delta|-dy
+	{
+		assert dy in I_Delta && 0 <= Y+dy < B.Length0;
+		assert Y_Coord(Y+dy);
+		var dx := 0;
+		while dx in I_Delta && X+dx < B.Length1
+			invariant Include_I_Inv2(P, S, B, Y, dy, X, dx)
+			decreases |I_Delta|-dx
+		{
+			if Possible_I_Shapes[Direction_of(P)][dy][dx] {
+				B[Y+dy, X+dx] := I;
+			}
+			dx := dx+1;
+		}
+		dy := dy+1;
+	}
+	assert Piece_Within_Board(P);
+}
+
+/*
+
+Goal: annotate the following implementation such that it verifies (changing the {:verify false} to {:verify true} or deleting it),
+      *documenting* the proof obligations as we've learned, using assertions and lemmas
+
+Hint for the loop invariants: have a look at the annotation in method Include_I_Piece_In_Board above
+
+*/
+method {:verify false} Include_Three_Piece_In_Board(P: Piece, S: State, B: Board)
+	requires ValidPiece(P) && ValidBoardDimensions(B)
+	requires IsThreeShape(Shape_of(P))
+	requires S == Piece_Blocked && Valid_Configuration(B, P, S)
+	modifies B
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && CellIncluded(P, x, y) :: B[y, x] == Shape_of(P)
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && !CellIncluded(P, x, y) :: B[y, x] == old(B[y, x])
+{
+	var y := 0;
+	while y in Three_Delta
+	{
+		var x := 0;
+		while x in Three_Delta
+		{
+			if Possible_Three_Shapes[Shape_of(P)][Direction_of(P)][y][x] {
+				B[Y_of(P)+y, X_of(P)+x] := Shape_of(P);
+			}
+			x := x+1;
+		}
+		y := y+1;
+	}
+}
+
+// remove all complete lines from the board [verification of this method is left for future work (beyond the scope of the original 2024 assignment)]
+method {:verify false} Delete_Complete_Lines(P: Piece, S0: State, B: Board, ghost BS0: BoardSnapshot) returns (deleted_lines: set<nat>, S: State, ghost BS: BoardSnapshot)
+	requires ValidPiece(P) && ValidBoardDimensions(B) && IsBoardSnapshot(B, BS0)
+	requires S0 == Board_Before_Clean && Valid_Configuration(B, P, S0)
+	modifies B
+	ensures IsBoardSnapshot(B, BS)
+	ensures S == Board_After_Clean && Valid_Configuration(B, P, S)
+	ensures forall line | 0 <= line < Y_Size :: line in deleted_lines <==> Is_Complete_BoardSnapshotLine(BS0[line])
+	ensures forall line | 0 <= line < |deleted_lines| :: Is_Empty_Line(B, line)
+	ensures forall from_line, to_line | 0 <= from_line <= to_line < B.Length0 && from_line !in deleted_lines &&
+		to_line == from_line+Dive(from_line, deleted_lines) :: BS0[from_line] == BS[to_line]
+{
+	S, BS := S0, BS0;
+	var to_line := MAX_Y_Coord;
+	var has_complete_lines := false;
+	deleted_lines := {};
+	// delete all complete lines, identifying the first complete line from
+	// the bottom (higher value of Y)
+	var del_line := 0;
+	while del_line != Y_Size
+		invariant 0 <= del_line <= Y_Size && ValidBoardDimensions(B)
+		invariant old(IsBoardSnapshot(B, BS0))
+		invariant IsBoardSnapshot(B, BS)
+		invariant has_complete_lines <==> |deleted_lines| != 0
+		invariant has_complete_lines ==> to_line == MaxInSet(deleted_lines)
+		invariant forall line | 0 <= line < del_line :: line in deleted_lines <==> Is_Complete_BoardSnapshotLine(BS0[line])
+		invariant forall line | 0 <= line < del_line :: line in deleted_lines ==> Is_Empty_Line(B, line)
+		invariant forall line | 0 <= line < del_line && line !in deleted_lines :: BS0[line] == BS[line]
+		decreases Y_Size-del_line
+	{
+		if Is_Complete_Line(B, del_line) {
+			DeleteLine(B, del_line);
+			BS := BS[del_line := Empty_Line];
+			has_complete_lines := true;
+			deleted_lines := deleted_lines+{del_line};
+			to_line := del_line;
+			assert B[del_line, MIN_X_Coord] == Empty;
+		}
+		del_line := del_line+1;
+	}
+	// iteratively move non-empty lines to the bottom of the board
+	if has_complete_lines {
+		assert del_line == Y_Size && ValidBoardDimensions(B);
+		assert old(IsBoardSnapshot(B, BS0));
+		assert IsBoardSnapshot(B, BS);
+		assert has_complete_lines;
+		assert |deleted_lines| != 0;
+		assert to_line == MaxInSet(deleted_lines);
+		assert forall line | 0 <= line < Y_Size :: line in deleted_lines <==> Is_Complete_BoardSnapshotLine(BS0[line]);
+		assert forall line | 0 <= line < Y_Size :: line in deleted_lines ==> Is_Empty_Line(B, line);
+		assert forall line | 0 <= line < Y_Size && line !in deleted_lines :: BS0[line] == BS[line];
+		var from_line := to_line-1;
+		assert -1 <= from_line < to_line < Y_Size;
+		while from_line >= 0
+			invariant -1 <= from_line < to_line < Y_Size && ValidBoardDimensions(B)
+			invariant to_line-from_line == Dive(from_line, deleted_lines)
+			invariant forall line | 0 <= line < Y_Size :: line in deleted_lines <==> Is_Complete_BoardSnapshotLine(BS0[line])
+			invariant forall line | from_line < line <= to_line :: Is_Empty_Line(B, line)
+			// invariant forall from_line', to_line' | from_line < from_line' < to_line' < B.Length0 && from_line' !in deleted_lines &&
+			// 	to_line == from_line'+Dive(from_line', deleted_lines) :: BS0[from_line'] == BS[to_line]
+			decreases from_line
+		{
+			if !Is_Empty_Line(B, from_line) {
+				CopyLine(B, from_line, to_line);
+				BS := BS[to_line := BS[from_line]];
+				DeleteLine(B, from_line);
+				to_line := to_line-1;
+				assert B[from_line, MIN_X_Coord] == Empty;
+			}
+			from_line := from_line-1;
+		}
+	}
+	// update current state
+	S := Board_After_Clean;
+}

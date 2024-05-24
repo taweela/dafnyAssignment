@@ -1,0 +1,492 @@
+/*
+
+Final assignment (optional) exercise #3 - Assertive Programming course @ BGU, Fall Semester 2024
+
+Closely following code+spec(*)+annotations from AdaCore's "SPARK tetris example for Raspberry Pico Display":
+- https://blog.adacore.com/spark-tetris-on-the-raspberry-pico
+- https://github.com/elsaferrara/tetris
+
+(*) added some functional requirements - beyond the original focus on the absence of runtime errors
+
+- using Dafny 4.4.0
+
+*/
+
+// possible content of the board cells
+datatype Cell = Empty | I | O | J | L | S | T | Z
+
+// subset of cells that correspond to a shape
+predicate IsShape(c: Cell) { c != Empty }
+
+// subset of shapes that fits in a 3 x 3 box, that is, all expect I and O
+predicate IsThreeShape(c: Cell) { IsShape(c) && c != I && c != O }
+
+// the board is a matrix of X_Size x Y_Size cells, where the origin (0,0) is at the top left corner
+
+const X_Size := 10
+const Y_Size := 20
+
+const MIN_X_Coord := 0
+const MAX_X_Coord := X_Size-1
+const MIN_Y_Coord := 0
+const MAX_Y_Coord := Y_Size-1
+
+predicate X_Coord(x: int) { MIN_X_Coord <= x <= MAX_X_Coord }
+predicate Y_Coord(y: int) { MIN_Y_Coord <= y <= MAX_Y_Coord }
+
+const Distance_Between_Boards := X_Size+3 // in the display of a game history
+
+type Board = array2<Cell>
+type BoardSnapshotLine = seq<Cell>
+type BoardSnapshot = seq<BoardSnapshotLine>
+
+predicate ValidBoardDimensions(B: Board) { B.Length0 == Y_Size && B.Length1 == X_Size }
+predicate ValidBoardSnapshotDimensions(BS: BoardSnapshot) { |BS| == Y_Size && forall y | 0 <= y < Y_Size :: ValidBoardSnapshotLineLength(BS[y]) }
+predicate ValidBoardSnapshotLineLength(LS: BoardSnapshotLine) { |LS| == X_Size }
+
+const Empty_Line := seq(X_Size, x => Empty) // == [Empty, Empty, Empty, Empty, Empty, Empty, Empty, Empty, Empty, Empty]
+const Empty_Board := seq(Y_Size, x => Empty_Line)
+
+// current piece has a shape, a direction, and a coordinate for the
+// top left corner of the square box enclosing the piece:
+//   a 2 x 2 box for shape O
+//   a 3 x 3 box for all shapes except I and O
+//   a 4 x 4 box for shape I
+//const PX_Coords := {-2, -1}+(X_Coords-{MAX_X_Coord})
+predicate PX_Coord(x: int) { MIN_X_Coord-2 <= x <= MAX_X_Coord-1 }
+//const PY_Coords := {-2, -1}+(Y_Coords-{MAX_Y_Coord})
+predicate PY_Coord(y: int) { MIN_Y_Coord-2 <= y <= MAX_Y_Coord-1 }
+
+const North := 0
+const East := 1
+const South := 2
+const West := 3
+type Direction = d | d == North || d == East || d == South || d == West
+
+type Piece = (Cell, Direction, int, int)
+
+const OneDirection: Direction := North
+const DummyPiece := (Z, OneDirection, 0, 0)
+
+function Shape_of(p: Piece): Cell { p.0 }
+function Direction_of(p: Piece): Direction { p.1 }
+function X_of(p: Piece): int { p.2 }
+function Y_of(p: Piece): int { p.3 }
+
+predicate ValidPiece(p: Piece) { IsShape(Shape_of(p)) }
+
+datatype DisplayInfo = DisplayInfo(time: nat, BS: BoardSnapshot, falling_piece: Piece, is_new_piece: bool, latest_action: Action, score: nat)
+
+// the game loops through the following states (captured in method Main by "cur_board", "cur_piece", "cur_score", and "cur_state"):
+// - a piece is falling, in which case cur_piece is set to this piece
+// - the piece cur_piece is blocked by previous fallen pieces in the board cur_board
+// - the piece has been included in the board, which may contain complete lines that need to be deleted
+// - complete lines have been deleted from the board
+
+datatype State = Piece_Falling | Piece_Blocked | Board_Before_Clean | Board_After_Clean
+
+// orientations of shapes are taken from the Super Rotation System at http://tetris.wikia.com/wiki/SRS
+// shape O has no orientation
+// shape I has 4 orientations, which all fit in the 4 x 4 box
+// shapes except I and O have 4 orientations, which all fit in the 3 x 3 box
+
+// Note that Possible_I_Shapes and Possible_Three_Shapes should be accessed
+// with Y component first, then X component, so that higher value for
+// Direction correspond indeed to clockwise movement.
+
+const I_Delta := {0, 1, 2, 3}
+const Three_Delta := {0, 1, 2}
+
+// orientations for I
+
+const Possible_I_Shapes :=
+	[[[false, false, false, false], [true,  true,  true,  true],
+	  [false, false, false, false], [false, false, false, false]],
+
+	 [[false, false, true,  false], [false, false, true,  false],
+	  [false, false, true,  false], [false, false, true,  false]],
+
+	 [[false, false, false, false], [false, false, false, false],
+	  [true,  true,  true,  true],  [false, false, false, false]],
+
+	 [[false, true,  false, false], [false, true,  false, false],
+	  [false, true,  false, false], [false, true,  false, false]]]
+
+const Possible_Three_Shapes :=
+	map[// orientations for J
+	 J := [[[true, false, false], [true,  true,  true],  [false, false, false]],
+	  [[false, true, true], [false,  true,  false],  [false, true, false]],
+	  [[false, false, false], [true,  true,  true],  [false, false, true]],
+	  [[false, true, false], [false,  true,  false],  [true, true, false]]],
+
+	 // orientations for L
+	 L := [[[false, false, true], [true,  true,  true],  [false, false, false]],
+	  [[false, true, false], [false,  true,  false],  [false, true, true]],
+	  [[false, false, false], [true,  true,  true],  [true, false, false]],
+	  [[true, true, false], [false,  true,  false],  [false, true, false]]],
+
+	 // orientations for S
+	 S := [[[false, true, true], [true,  true,  false],  [false, false, false]],
+	  [[false, true, false], [false,  true,  true],  [false, false, true]],
+	  [[false, false, false], [false,  true,  true],  [true, true, false]],
+	  [[true, false, false], [true,  true,  false],  [false, true, false]]],
+
+	 // orientations for T
+	 T := [[[false, true, false], [true,  true,  true],  [false, false, false]],
+	  [[false, true, false], [false,  true,  true],  [false, true, false]],
+	  [[false, false, false], [true,  true,  true],  [false, true, false]],
+	  [[false, true, false], [true,  true,  false],  [false, true, false]]],
+
+	 // orientations for Z
+	 Z := [[[true, true, false], [false,  true,  true],  [false, false, false]],
+	  [[false, false, true], [false,  true,  true],  [false, true, false]],
+	  [[false, false, false], [true,  true,  false],  [false, true, true]],
+	  [[false, true, false], [true,  true,  false],  [true, false, false]]]]
+
+// the configuration of the board and piece should always be valid, meaning
+// the piece and the board should not overlap, and the piece should fit in
+// the board limits.
+
+predicate Is_Empty(B: Board, Y: int, X: int)
+	requires ValidBoardDimensions(B)
+	reads B
+{
+	X_Coord(X) && Y_Coord(Y) &&
+	//assert 0 <= Y < B.Length && 0 <= X < B[Y].Length == X_Size by { assert B[Y] in B[..] && ValidBoardDimensions(B); }
+	B[Y, X] == Empty
+}
+
+predicate Is_Complete_Line(B: Board, y: int)
+	requires ValidBoardDimensions(B) && Y_Coord(y)
+	reads B
+{
+	forall x | 0 <= x < B.Length1 :: B[y, x] != Empty
+}
+
+ghost predicate Is_Complete_BoardSnapshotLine(L: BoardSnapshotLine)
+	requires ValidBoardSnapshotLineLength(L)
+{
+	forall x | 0 <= x < |L| :: L[x] != Empty
+}
+
+predicate Is_Empty_Line(B: Board, y: int)
+	requires ValidBoardDimensions(B) && Y_Coord(y)
+	reads B
+{
+	forall x | 0 <= x < B.Length1 :: B[y, x] == Empty
+}
+
+predicate No_Complete_Lines(B: Board)
+	requires ValidBoardDimensions(B)
+	reads B
+{
+	forall Y | 0 <= Y < B.Length0 :: !Is_Complete_Line(B, Y)
+}
+
+predicate Piece_Within_Board(P: Piece)
+	requires ValidPiece(P)
+{
+	match Shape_of(P)
+	case O =>
+		Y_Coord(Y_of(P)) && X_Coord(X_of(P)) &&
+		Y_Coord(Y_of(P)+1) && X_Coord(X_of(P)+1)
+	case I =>
+		forall X,Y | X in I_Delta && Y in I_Delta ::
+			Possible_I_Shapes[Direction_of(P)][Y][X] ==> Y_Coord(Y_of(P)+Y) &&  X_Coord(X_of(P)+X)
+	case _ =>
+		assert IsThreeShape(Shape_of(P));
+		forall X,Y | X in Three_Delta && Y in Three_Delta ::
+			Possible_Three_Shapes[Shape_of(P)][Direction_of(P)][Y][X] ==> Y_Coord(Y_of(P)+Y) &&  X_Coord(X_of(P)+X)
+}
+
+predicate No_Overlap(B: Board, P: Piece)
+	requires ValidBoardDimensions(B) && ValidPiece(P)
+	reads B
+{
+	match Shape_of(P)
+	case O =>
+		Is_Empty(B, Y_of(P), X_of(P))   && Is_Empty(B, Y_of(P), X_of(P)+1) &&
+		Is_Empty(B, Y_of(P)+1, X_of(P)) && Is_Empty(B, Y_of(P)+1, X_of(P)+1)
+	case I =>
+		forall X,Y | X in I_Delta && Y in I_Delta ::
+			Possible_I_Shapes[Direction_of(P)][Y][X] ==> Is_Empty(B, Y_of(P)+Y, X_of(P)+X)
+	case _ =>
+		assert IsThreeShape(Shape_of(P));
+		forall X,Y | X in Three_Delta && Y in Three_Delta ::
+			Possible_Three_Shapes[Shape_of(P)][Direction_of(P)][Y][X] ==> Is_Empty(B, Y_of(P)+Y, X_of(P)+X)
+}
+
+predicate Valid_Configuration(B: Board, P: Piece, S: State)
+	requires ValidBoardDimensions(B) && ValidPiece(P)
+	reads B
+{
+	Piece_Within_Board(P) &&
+	match S
+	case Piece_Falling => No_Overlap (B, P)
+	case Piece_Blocked => No_Overlap (B, P) && BlockedPiece(P, S, B)
+	case Board_Before_Clean => true
+	case Board_After_Clean => No_Complete_Lines(B)
+}
+
+// movements of the piece in the 3 possible directions
+datatype Action = Move_Left | Move_Right | Move_Down | Turn_Counter_Clockwise | Turn_Clockwise
+
+predicate IsMoveAction(A: Action) { A == Move_Left || A == Move_Right }
+predicate IsTurnAction(A: Action) { A == Turn_Counter_Clockwise || A == Turn_Clockwise }
+
+function Turn_Direction(D: Direction, T: Action): Direction
+	requires IsTurnAction(T)
+{
+	match T
+	case Turn_Counter_Clockwise => (D+3) % 4
+	case Turn_Clockwise => (D+1) % 4
+}
+
+predicate Move_Is_Possible(P: Piece, A : Action)
+	requires ValidPiece(P)
+{
+	match A
+	case Move_Left => PX_Coord(X_of(P)-1)
+	case Move_Right => PX_Coord(X_of(P)+1)
+	case Move_Down => PY_Coord(Y_of(P)+1)
+	case Turn_Action => true
+}
+
+function Move(P: Piece, A: Action): Piece
+	requires ValidPiece(P) && Move_Is_Possible(P, A)
+{
+	match A
+	case Move_Left   => (Shape_of(P), Direction_of(P), X_of(P)-1, Y_of(P))
+	case Move_Right  => (Shape_of(P), Direction_of(P), X_of(P)+1, Y_of(P))
+	case Move_Down   => (Shape_of(P), Direction_of(P), X_of(P), Y_of(P)+1)
+	case Turn_Action => (Shape_of(P), Turn_Direction(Direction_of(P), A), X_of(P), Y_of(P))
+}
+
+ghost predicate CellIncluded(P: Piece, x: nat, y: nat) {
+	ValidPiece(P) && Piece_Within_Board(P) &&
+	match Shape_of(P)
+	case O => CellIncluded_O_Shape(P, x, y)
+	case I => CellIncluded_I_Shape(P, x, y)
+	case _ => assert IsThreeShape(Shape_of(P)); CellIncluded_Three_Shape(P, x, y)
+}
+
+ghost predicate CellIncluded_O_Shape(P: Piece, x: nat, y: nat)
+	requires ValidPiece(P) && Piece_Within_Board(P) && Shape_of(P) == O
+{
+	var dx, dy := x-X_of(P), y-Y_of(P);
+	(dx == 0 || dx == 1) && (dy == 0 || dy == 1)
+}
+
+ghost predicate CellIncluded_I_Shape(P: Piece, x: nat, y: nat)
+	requires ValidPiece(P) && Piece_Within_Board(P) && Shape_of(P) == I
+{
+	var dx, dy := x-X_of(P), y-Y_of(P);
+	dx in I_Delta && dy in I_Delta &&
+	Possible_I_Shapes[Direction_of(P)][dy][dx]
+}
+
+ghost predicate CellIncluded_Three_Shape(P: Piece, x: nat, y: nat)
+	requires ValidPiece(P) && Piece_Within_Board(P) && IsThreeShape(Shape_of(P))
+{
+	var dx, dy := x-X_of(P), y-Y_of(P);
+	dx in Three_Delta && dy in Three_Delta &&
+	Possible_Three_Shapes[Shape_of(P)][Direction_of(P)][dy][dx]
+}
+
+predicate BlockedPiece(P: Piece, S: State, B: Board)
+	requires ValidPiece(P) && ValidBoardDimensions(B)
+	requires Piece_Within_Board(P)
+	reads B
+{
+	S == Piece_Blocked &&
+	!(Move_Is_Possible(P, Move_Down) && No_Overlap(B, Move(P, Move_Down)))
+}
+
+
+twostate predicate OtherLinesUnmodified(B: Board, line: int)
+	requires ValidBoardDimensions(B) && Y_Coord(line)
+	reads B
+{
+	forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && y != line :: B[y, x] == old(B[y, x])
+}
+
+twostate predicate UnmodifiedLine(B: Board, line: nat)
+	requires ValidBoardDimensions(B) && Y_Coord(line)
+	reads B
+{
+	forall column | 0 <= column < B.Length1 :: B[line, column] == old(B[line, column])
+}
+
+twostate predicate CopiedLine(B: Board, from_line: nat, to_line: nat)
+	requires ValidBoardDimensions(B) && Y_Coord(from_line) && Y_Coord(to_line)
+	reads B
+{
+	CopiedColumns(B, from_line, to_line, 0, B.Length1)
+}
+
+twostate predicate CopiedColumns(B: Board, from_line: nat, to_line: nat, start: nat, end: nat)
+	requires ValidBoardDimensions(B) && Y_Coord(from_line) && Y_Coord(to_line) && 0 <= start <= end <= X_Size
+	reads B
+{
+	forall x | start <= x < end :: B[to_line, x] == old(B[from_line, x])
+}
+
+method CopyLine(B: Board, from_line: int, to_line: int)
+	requires ValidBoardDimensions(B) && Y_Coord(from_line) && Y_Coord(to_line) && from_line != to_line
+	modifies B
+	ensures OtherLinesUnmodified(B, to_line)
+	ensures CopiedLine(B, from_line, to_line)
+{
+	var i := 0;
+	while i != X_Size
+		invariant 0 <= i <= X_Size
+		invariant OtherLinesUnmodified(B, to_line)
+		invariant CopiedColumns(B, from_line, to_line, 0, i)
+		decreases X_Size-i
+	{
+		B[to_line, i] := B[from_line, i];
+		i := i+1;
+	}
+}
+
+method InitLine(B: Board, line: nat, C: Cell)
+	requires ValidBoardDimensions(B) && Y_Coord(line)
+	modifies B
+	ensures forall x | 0 <= x < B.Length1 :: B[line, x] == C
+	ensures OtherLinesUnmodified(B, line)
+{
+	var i := 0;
+	while i != X_Size
+		invariant 0 <= i <= X_Size
+		invariant forall x | 0 <= x < i :: B[line, x] == C
+		invariant forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 && y != line :: B[y, x] == old(B[y,x])
+		decreases X_Size-i
+	{
+		B[line, i] := C;
+		i := i+1;
+	}
+}
+
+method DeleteLine(B: Board, del_line: int)
+	requires ValidBoardDimensions(B) && Y_Coord(del_line)
+	modifies B
+	ensures forall x | 0 <= x < B.Length1 :: B[del_line, x] == Empty
+	ensures OtherLinesUnmodified(B, del_line)
+{
+	InitLine(B, del_line, Empty);
+}
+
+method InitBoard(B: Board)
+	requires ValidBoardDimensions(B)
+	modifies B
+	ensures forall x, y | 0 <= y < B.Length0 && 0 <= x < B.Length1 :: B[y, x] == Empty
+{
+	var i := 0;
+	while i != Y_Size
+		invariant 0 <= i <= Y_Size
+		invariant forall x, y | 0 <= y < i && 0 <= x < B.Length1 :: B[y, x] == Empty
+		decreases Y_Size-i
+	{
+		DeleteLine(B, i);
+		i := i+1;
+	}
+}
+
+method TakeBoardSnapshotLine(B: Board, line: nat) returns (LS: BoardSnapshotLine)
+	requires ValidBoardDimensions(B) && Y_Coord(line)
+	ensures |LS| == X_Size && forall column | 0 <= column < X_Size :: LS[column] == B[line, column]
+{
+	assert B.Length0 == Y_Size && B.Length1 == X_Size;
+	var columns := new Cell[X_Size];
+	var i := 0;
+	while i != X_Size
+		invariant 0 <= i <= X_Size
+		invariant forall x | 0 <= x < i :: columns[x] == B[line, x]
+		decreases X_Size-i
+	{
+		columns[i] := B[line, i];
+		i := i+1;
+	}
+	LS := columns[..];
+}
+
+function TakeBoardSnapshotLineRecFrom(B: Board, line: nat, start_column: nat): seq<Cell>
+	requires ValidBoardDimensions(B) && 0 <= line < B.Length0 && 0 <= start_column <= B.Length1
+	decreases B.Length1-start_column
+	reads B
+{
+	if start_column == B.Length1 then [] else [B[line, start_column]] + TakeBoardSnapshotLineRecFrom(B, line, start_column+1)
+}
+
+function TakeBoardSnapshotLineRec(B: Board, line: nat): BoardSnapshotLine
+	requires ValidBoardDimensions(B) && 0 <= line < B.Length0
+	reads B
+{
+	TakeBoardSnapshotLineRecFrom(B, line, 0)
+}
+
+function TakeBoardSnapshotRecFrom(B: Board, start_line: nat): seq<BoardSnapshotLine>
+	requires ValidBoardDimensions(B) && 0 <= start_line <= B.Length0
+	decreases B.Length0-start_line
+	reads B
+{
+	if start_line == B.Length0 then [] else [TakeBoardSnapshotLineRec(B, start_line)] + TakeBoardSnapshotRecFrom(B, start_line+1)
+}
+
+function TakeBoardSnapshotRec(B: Board): BoardSnapshot
+	requires ValidBoardDimensions(B)
+	reads B
+{
+	TakeBoardSnapshotRecFrom(B, 0)
+}
+
+predicate IsBoardSnapshot(B: Board, BS: BoardSnapshot)
+	requires ValidBoardDimensions(B)
+	reads B
+{
+	ValidBoardSnapshotDimensions(BS) && forall x, y | 0 <= y < |BS| && 0 <= x < |BS[y]| :: BS[y][x] == B[y, x]
+}
+
+method TakeBoardSnapshot(B: Board) returns (BS: BoardSnapshot)
+	requires ValidBoardDimensions(B)
+	ensures IsBoardSnapshot(B, BS)
+{
+	assert B.Length0 == Y_Size && B.Length1 == X_Size;
+	var lines := new seq<Cell>[Y_Size];
+	var i := 0;
+	while i != Y_Size
+		invariant 0 <= i <= Y_Size == B.Length0 == lines.Length
+		invariant forall y | 0 <= y < i :: |lines[y]| == X_Size
+		invariant forall x, y | 0 <= y < i && 0 <= x < B.Length1 :: lines[y][x] == B[y, x]
+		decreases Y_Size-i
+	{
+		lines[i] := TakeBoardSnapshotLine(B, i);
+		i := i+1;
+	}
+	BS := lines[..];
+}
+
+function Dive(line: nat, deleted_lines: set<nat>): nat
+	requires Y_Coord(line)
+	requires forall del_line | del_line in deleted_lines :: Y_Coord(del_line)
+	decreases MAX_Y_Coord-line
+{
+	if line == MAX_Y_Coord then
+		0
+	else
+		Dive(line+1, deleted_lines) + (if line+1 in deleted_lines then 1 else 0)
+}
+
+ghost function MaxInSet(s: set<int>): int
+	requires |s| >= 1
+	decreases s
+{
+	var x :| x in s;
+	if |s| == 1 then
+		x
+	else
+		var m := MaxInSet(s-{x});
+		if x > m then
+			x
+		else m
+}
